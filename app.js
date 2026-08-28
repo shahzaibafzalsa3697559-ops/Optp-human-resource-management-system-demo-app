@@ -1,28 +1,68 @@
 const CONFIG = Object.freeze({
   APP_PIN: "1234",
   SESSION_STORAGE_KEY: "optp_demo_session",
-  DB_ACTIVE_KEY: "optp_demo_active_employees",
-  DB_ARCHIVE_KEY: "optp_demo_archived_employees"
+  DB_NAME: "OPTP_DEMO_DB",
+  DB_VERSION: 1,
+  STORE_ACTIVE: "active_employees",
+  STORE_ARCHIVED: "archived_employees"
 });
 
-// Clean initial state (no dummy records)
-const INITIAL_DEMO_DATA = [];
+// IndexedDB Engine for high-capacity local storage
+const IDB = {
+  db: null,
 
-const LocalDB = {
-  load(key, fallback = []) {
-    try {
-      const data = localStorage.getItem(key);
-      return data ? JSON.parse(data) : fallback;
-    } catch (e) {
-      return fallback;
-    }
+  async init() {
+    if (this.db) return this.db;
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(CONFIG.DB_NAME, CONFIG.DB_VERSION);
+      request.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(CONFIG.STORE_ACTIVE)) {
+          db.createObjectStore(CONFIG.STORE_ACTIVE, { keyPath: "id" });
+        }
+        if (!db.objectStoreNames.contains(CONFIG.STORE_ARCHIVED)) {
+          db.createObjectStore(CONFIG.STORE_ARCHIVED, { keyPath: "id" });
+        }
+      };
+      request.onsuccess = (e) => {
+        this.db = e.target.result;
+        resolve(this.db);
+      };
+      request.onerror = (e) => reject(e.target.error);
+    });
   },
-  save(key, data) {
-    try {
-      localStorage.setItem(key, JSON.stringify(data));
-    } catch (e) {
-      console.error("Storage save failed", e);
-    }
+
+  async getAll(storeName) {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, "readonly");
+      const store = tx.objectStore(storeName);
+      const req = store.getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+  },
+
+  async put(storeName, item) {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, "readwrite");
+      const store = tx.objectStore(storeName);
+      const req = store.put(item);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  },
+
+  async delete(storeName, id) {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, "readwrite");
+      const store = tx.objectStore(storeName);
+      const req = store.delete(id);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
   }
 };
 
@@ -72,7 +112,14 @@ function getStoredSession() {
 }
 
 function purgeSession() {
-  try { localStorage.removeItem(CONFIG.SESSION_STORAGE_KEY); } catch (e) {}
+  try {
+    localStorage.removeItem(CONFIG.SESSION_STORAGE_KEY);
+  } catch (e) {}
+}
+
+function isValidEmail(email) {
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return re.test(String(email).trim().toLowerCase());
 }
 
 function compressImageFile(file, maxDimension, quality) {
@@ -100,17 +147,9 @@ function compressImageFile(file, maxDimension, quality) {
   });
 }
 
-function syncFromStorage() {
-  if (localStorage.getItem(CONFIG.DB_ACTIVE_KEY) === null) {
-    LocalDB.save(CONFIG.DB_ACTIVE_KEY, INITIAL_DEMO_DATA);
-  }
-  activeEmployees = LocalDB.load(CONFIG.DB_ACTIVE_KEY, []);
-  archivedEmployees = LocalDB.load(CONFIG.DB_ARCHIVE_KEY, []);
-}
-
-function syncToStorage() {
-  LocalDB.save(CONFIG.DB_ACTIVE_KEY, activeEmployees);
-  LocalDB.save(CONFIG.DB_ARCHIVE_KEY, archivedEmployees);
+async function syncFromDatabase() {
+  activeEmployees = await IDB.getAll(CONFIG.STORE_ACTIVE);
+  archivedEmployees = await IDB.getAll(CONFIG.STORE_ARCHIVED);
 }
 
 function promptAuth(label, onSuccess) {
@@ -118,7 +157,7 @@ function promptAuth(label, onSuccess) {
   overlay.className = "modal-backdrop";
   overlay.innerHTML = `
     <div class="card auth-dialog">
-      <div class="sub-header">VERIFICATION (PIN: ${CONFIG.APP_PIN})</div>
+      <div class="sub-header">VERIFICATION REQUIRED</div>
       <h3 class="accent-text" style="margin:8px 0 16px;font-size:16px;">${sanitize(label)}</h3>
       <div class="field"><input type="password" id="dialog-pin" placeholder="Enter PIN" autocomplete="off"></div>
       <div id="dialog-pin-error" style="color:var(--danger);font-size:11px;min-height:14px;margin-bottom:10px;"></div>
@@ -144,7 +183,9 @@ function promptAuth(label, onSuccess) {
 
   overlay.querySelector("#dialog-ok").onclick = verify;
   overlay.querySelector("#dialog-abort").onclick = () => overlay.remove();
-  input.addEventListener("keydown", e => { if (e.key === "Enter") verify(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") verify();
+  });
 }
 
 function performLogout() {
@@ -326,7 +367,7 @@ function bindFormEvents(store) {
   wireCnicField("f-cnic");
   wireCnicField("f-fatherCnic");
 
-  ["f-dob", "f-joiningDate"].forEach(id => {
+  ["f-dob", "f-joiningDate"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) {
       el.addEventListener("click", () => {
@@ -337,23 +378,23 @@ function bindFormEvents(store) {
     }
   });
 
-  document.getElementById("f-qualification")?.addEventListener("change", e => {
+  document.getElementById("f-qualification")?.addEventListener("change", (e) => {
     document.getElementById("qual-detail-wrap").classList.toggle("hidden", e.target.value !== "Graduation Continue");
   });
 
-  document.querySelectorAll('input[name="f-relStatus"]').forEach(r => r.addEventListener("change", () => {
+  document.querySelectorAll('input[name="f-relStatus"]').forEach((r) => r.addEventListener("change", () => {
     document.getElementById("children-wrap").classList.toggle("hidden", document.querySelector('input[name="f-relStatus"]:checked')?.value !== "Married");
   }));
 
-  document.querySelectorAll('input[name="f-illness"]').forEach(r => r.addEventListener("change", () => {
+  document.querySelectorAll('input[name="f-illness"]').forEach((r) => r.addEventListener("change", () => {
     document.getElementById("illness-detail-wrap").classList.toggle("hidden", document.querySelector('input[name="f-illness"]:checked')?.value !== "Yes");
   }));
 
-  document.querySelectorAll('input[name="f-crime"]').forEach(r => r.addEventListener("change", () => {
+  document.querySelectorAll('input[name="f-crime"]').forEach((r) => r.addEventListener("change", () => {
     document.getElementById("crime-detail-wrap").classList.toggle("hidden", document.querySelector('input[name="f-crime"]:checked')?.value !== "Yes");
   }));
 
-  document.querySelectorAll('input[name="f-prevExp"]').forEach(r => r.addEventListener("change", () => {
+  document.querySelectorAll('input[name="f-prevExp"]').forEach((r) => r.addEventListener("change", () => {
     document.getElementById("prevexp-detail-wrap").classList.toggle("hidden", document.querySelector('input[name="f-prevExp"]:checked')?.value !== "Yes");
   }));
 
@@ -384,8 +425,8 @@ function bindFormEvents(store) {
 }
 
 function parseFormData(existing = {}) {
-  const getVal = id => document.getElementById(id)?.value?.trim() || "";
-  const getRadio = name => document.querySelector(`input[name="${name}"]:checked`)?.value || "";
+  const getVal = (id) => document.getElementById(id)?.value?.trim() || "";
+  const getRadio = (name) => document.querySelector(`input[name="${name}"]:checked`)?.value || "";
 
   return Object.assign({}, existing, {
     position: getVal("f-position"),
@@ -437,12 +478,15 @@ function validateRecordForm(d) {
     if (!d.prevSalary) missing.push("Previous Salary");
     if (!d.prevReason) missing.push("Reason for Leaving");
   }
+  if (!d.picture) missing.push("Picture");
+  if (!d.cnicFront) missing.push("CNIC Front");
+  if (!d.cnicBack) missing.push("CNIC Back");
   return missing;
 }
 
 function renderEmployeeGrid(list, statusClass) {
-  if (!list.length) return `<div class="empty-view card">No records found.</div>`;
-  return `<div class="records-grid">` + list.map(emp => `
+  if (!list.length) return `<div class="empty-view card">No demo records found.</div>`;
+  return `<div class="records-grid">` + list.map((emp) => `
     <div class="card employee-card" data-id="${sanitize(emp.id)}">
       ${emp.picture ? `<img class="avatar" src="${sanitize(emp.picture)}">` : `<div class="avatar empty">👤</div>`}
       <div class="emp-name">${sanitize(emp.fullName || "(No name)")}</div>
@@ -455,7 +499,7 @@ function filterRecords(list, q) {
   if (!q) return list;
   const target = q.toLowerCase();
   const targetDigits = q.replace(/\D/g, "");
-  return list.filter(e => {
+  return list.filter((e) => {
     const name = (e.fullName || "").toLowerCase();
     const cnic = (e.cnic || "").toLowerCase();
     if (name.includes(target) || cnic.includes(target)) return true;
@@ -534,7 +578,7 @@ function buildPrintDocument(emp) {
       ${emp.cnicFront ? `<div><img src="${emp.cnicFront}"><div class="dlbl">CNIC Front</div></div>` : ""}
       ${emp.cnicBack ? `<div><img src="${emp.cnicBack}"><div class="dlbl">CNIC Back</div></div>` : ""}
     </div>
-    <div class="pfooter">Confidential Employee Record &bull; OPTP Sch III (Demo Offline Database)</div>
+    <div class="pfooter">Confidential Employee Record &bull; OPTP Sch III (Demo High-Capacity Storage)</div>
   </body></html>`;
 }
 
@@ -548,7 +592,9 @@ function triggerPrint(emp) {
   win.document.open();
   win.document.write(html);
   win.document.close();
-  const printAction = () => { try { win.focus(); win.print(); } catch (e) {} };
+  const printAction = () => {
+    try { win.focus(); win.print(); } catch (e) {}
+  };
   win.onload = printAction;
   setTimeout(printAction, 400);
 }
@@ -559,7 +605,7 @@ function renderFieldEntry(k, v) {
 
 function displayDetailModal(id, source) {
   const list = source === "current" ? activeEmployees : archivedEmployees;
-  const emp = list.find(e => e.id === id);
+  const emp = list.find((e) => e.id === id);
   if (!emp) return;
 
   const overlay = document.createElement("div");
@@ -567,7 +613,7 @@ function displayDetailModal(id, source) {
   overlay.innerHTML = `
     <div class="card modal-dialog">
       <span class="modal-dismiss" id="detail-close">&times;</span>
-      <div class="sub-header">${source === "current" ? "ACTIVE FILE (DEMO)" : "ARCHIVED FILE (DEMO)"}</div>
+      <div class="sub-header">${source === "current" ? "ACTIVE FILE" : "ARCHIVED FILE"}</div>
       <h2 class="accent-text" style="margin:6px 0 4px;">${sanitize(emp.fullName || "(No name)")}</h2>
       <div class="meta-text">${sanitize(emp.position || "")}</div>
       <div id="detail-thumbs" class="document-previews">
@@ -621,32 +667,40 @@ function displayDetailModal(id, source) {
   overlay.querySelector("#detail-close").onclick = () => overlay.remove();
   overlay.querySelector("#print-btn").onclick = () => promptAuth("Print Authorization", () => triggerPrint(emp));
   overlay.querySelector("#pdf-btn").onclick = () => promptAuth("PDF Export Authorization", () => triggerPrint(emp));
-  overlay.querySelector("#edit-btn").onclick = () => promptAuth("Edit Authorization", () => { overlay.remove(); displayEditModal(emp, source); });
-  
-  overlay.querySelector("#delete-btn").onclick = () => promptAuth("Delete Authorization", () => {
-    if (!confirm(`Are you sure to delete "${emp.fullName || "this record"}"?`)) return;
-    const arr = source === "current" ? activeEmployees : archivedEmployees;
-    const idx = arr.findIndex(e => e.id === id);
-    if (idx > -1) arr.splice(idx, 1);
-    syncToStorage();
+  overlay.querySelector("#edit-btn").onclick = () => promptAuth("Edit Authorization", () => {
     overlay.remove();
-    showNotification("Record deleted from demo storage.");
+    displayEditModal(emp, source);
+  });
+
+  overlay.querySelector("#delete-btn").onclick = () => promptAuth("Delete Authorization", async () => {
+    if (!confirm(`Are you sure to delete "${emp.fullName || "this record"}"?`)) return;
+    const storeName = source === "current" ? CONFIG.STORE_ACTIVE : CONFIG.STORE_ARCHIVED;
+    await IDB.delete(storeName, id);
+    const arr = source === "current" ? activeEmployees : archivedEmployees;
+    const idx = arr.findIndex((e) => e.id === id);
+    if (idx > -1) arr.splice(idx, 1);
+    overlay.remove();
+    showNotification("Record deleted from demo database.");
     render();
   });
 
   if (source === "current") {
-    overlay.querySelector("#resign-btn").onclick = () => promptAuth("Status Change Authorization", () => { overlay.remove(); displayResignModal(emp); });
+    overlay.querySelector("#resign-btn").onclick = () => promptAuth("Status Change Authorization", () => {
+      overlay.remove();
+      displayResignModal(emp);
+    });
   } else {
-    overlay.querySelector("#reactivate-btn").onclick = () => promptAuth("Reactivation Authorization", () => {
-      const idx = archivedEmployees.findIndex(e => e.id === id);
+    overlay.querySelector("#reactivate-btn").onclick = () => promptAuth("Reactivation Authorization", async () => {
+      const idx = archivedEmployees.findIndex((e) => e.id === id);
       if (idx > -1) {
         const [moved] = archivedEmployees.splice(idx, 1);
         moved.status = "current";
         delete moved.exitType;
         delete moved.exitDate;
         delete moved.exitNote;
+        await IDB.delete(CONFIG.STORE_ARCHIVED, moved.id);
+        await IDB.put(CONFIG.STORE_ACTIVE, moved);
         activeEmployees.push(moved);
-        syncToStorage();
       }
       overlay.remove();
       showNotification("Employee reactivated.");
@@ -661,7 +715,7 @@ function displayResignModal(emp) {
   overlay.className = "modal-backdrop";
   overlay.innerHTML = `
     <div class="card auth-dialog" style="max-width:420px;text-align:left;">
-      <div class="sub-header">STATUS CHANGE (DEMO)</div>
+      <div class="sub-header">STATUS CHANGE</div>
       <h3 style="margin:8px 0 16px;">${sanitize(emp.fullName)}</h3>
       <div class="field"><label>Type</label>
         <div class="radio-group">
@@ -679,20 +733,21 @@ function displayResignModal(emp) {
   document.body.appendChild(overlay);
   overlay.querySelector("#exit-cancel").onclick = () => overlay.remove();
 
-  overlay.querySelector("#exit-confirm").onclick = () => {
+  overlay.querySelector("#exit-confirm").onclick = async () => {
     const type = overlay.querySelector('input[name="exit-type"]:checked').value;
     const date = overlay.querySelector("#exit-date").value.trim();
     const note = overlay.querySelector("#exit-note").value.trim();
 
-    const idx = activeEmployees.findIndex(e => e.id === emp.id);
+    const idx = activeEmployees.findIndex((e) => e.id === emp.id);
     if (idx > -1) {
       const [moved] = activeEmployees.splice(idx, 1);
       moved.status = "resigned";
       moved.exitType = type;
       moved.exitDate = date;
       moved.exitNote = note;
+      await IDB.delete(CONFIG.STORE_ACTIVE, moved.id);
+      await IDB.put(CONFIG.STORE_ARCHIVED, moved);
       archivedEmployees.push(moved);
-      syncToStorage();
     }
     overlay.remove();
     showNotification(`${emp.fullName} moved to Resigned / Retired.`);
@@ -708,7 +763,7 @@ function displayEditModal(emp, source) {
   overlay.innerHTML = `
     <div class="card modal-dialog">
       <span class="modal-dismiss" id="edit-close">&times;</span>
-      <div class="sub-header">EDIT RECORD (DEMO)</div>
+      <div class="sub-header">EDIT RECORD</div>
       <h2 class="accent-text" style="margin:6px 0 16px;">${sanitize(emp.fullName || "(No name)")}</h2>
       ${renderFormMarkup(emp)}
       <div class="form-buttons">
@@ -721,7 +776,7 @@ function displayEditModal(emp, source) {
 
   overlay.querySelector("#edit-close").onclick = () => overlay.remove();
   overlay.querySelector("#cancel-edit-btn").onclick = () => overlay.remove();
-  overlay.querySelector("#save-edit-btn").onclick = () => {
+  overlay.querySelector("#save-edit-btn").onclick = async () => {
     const data = parseFormData(store);
     const missing = validateRecordForm(data);
     if (missing.length) {
@@ -736,10 +791,12 @@ function displayEditModal(emp, source) {
       data.exitNote = emp.exitNote;
     }
 
+    const storeName = source === "current" ? CONFIG.STORE_ACTIVE : CONFIG.STORE_ARCHIVED;
+    await IDB.put(storeName, data);
+
     const arr = source === "current" ? activeEmployees : archivedEmployees;
-    const idx = arr.findIndex(e => e.id === emp.id);
+    const idx = arr.findIndex((e) => e.id === emp.id);
     if (idx > -1) arr[idx] = data;
-    syncToStorage();
 
     overlay.remove();
     showNotification("Changes saved to demo database.");
@@ -751,11 +808,11 @@ function render() {
   if (currentScreen === "pinlock") {
     root.innerHTML = `
       <div class="card auth-box">
-        <div class="sub-header">OPTP SCH III &bull; DEMO ACCESS</div>
+        <div class="sub-header">OPTP SCH III &bull; SECURE ACCESS</div>
         <h1 class="accent-text" style="font-size:22px;margin:8px 0 14px;">Employee Record System</h1>
-        <div class="meta-text" style="font-size:13px;margin-bottom:14px;">Default Demo PIN: <b>${CONFIG.APP_PIN}</b></div>
+        <div class="meta-text" style="font-size:13px;margin-bottom:14px;">Enter authorization PIN to unlock.</div>
         <div class="field">
-          <input type="password" id="pin-input" placeholder="Enter PIN (e.g. 1234)" autocomplete="off">
+          <input type="password" id="pin-input" placeholder="Enter PIN" autocomplete="off">
         </div>
         <div id="pin-error" style="color:var(--danger);font-size:11.5px;min-height:16px;margin:6px 0 4px;"></div>
         <button class="btn" id="pin-submit" style="width:100%;margin-top:8px;">Unlock</button>
@@ -764,26 +821,28 @@ function render() {
     const input = document.getElementById("pin-input");
     input?.focus();
 
-    function checkPin() {
+    async function checkPin() {
       if (input.value === CONFIG.APP_PIN) {
         const session = getStoredSession();
         if (session?.email) {
           currentSessionUser = session.email;
-          syncFromStorage();
+          await syncFromDatabase();
           currentScreen = "dashboard";
         } else {
           currentScreen = "login";
         }
         render();
       } else {
-        document.getElementById("pin-error").textContent = "Incorrect PIN (Try 1234).";
+        document.getElementById("pin-error").textContent = "Incorrect PIN.";
         input.value = "";
         input.focus();
       }
     }
 
     document.getElementById("pin-submit").onclick = checkPin;
-    input?.addEventListener("keydown", e => { if (e.key === "Enter") checkPin(); });
+    input?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") checkPin();
+    });
   }
 
   else if (currentScreen === "login") {
@@ -802,14 +861,14 @@ function render() {
         </div>
       </div>`;
 
-    function doLogin(email) {
-      if (!email || !email.includes("@")) {
-        showNotification("Please provide a valid email format.", true);
+    async function doLogin(email) {
+      if (!isValidEmail(email)) {
+        showNotification("Please enter a valid email address (e.g. name@domain.com).", true);
         return;
       }
       currentSessionUser = email.toLowerCase().trim();
       persistSession(currentSessionUser);
-      syncFromStorage();
+      await syncFromDatabase();
       currentScreen = "dashboard";
       render();
       showNotification(`Logged in as ${currentSessionUser}`);
@@ -861,7 +920,7 @@ function render() {
     root.innerHTML = renderHeaderBar() + `
       <div id="main-container">
         <div class="view-heading"><span class="nav-link" id="nav-dash">&larr; Dashboard</span></div>
-        <h2 class="accent-text" style="margin:10px 0 4px;">New Employee Record (Demo)</h2>
+        <h2 class="accent-text" style="margin:10px 0 4px;">New Employee Record</h2>
         <div class="meta-text">Mandatory fields are marked with *</div>
         <div class="card form-body">
           ${renderFormMarkup()}
@@ -877,7 +936,7 @@ function render() {
     document.getElementById("nav-dash").onclick = () => { currentScreen = "dashboard"; render(); };
     document.getElementById("cancel-new-btn").onclick = () => { currentScreen = "dashboard"; render(); };
 
-    document.getElementById("save-new-btn").onclick = () => {
+    document.getElementById("save-new-btn").onclick = async () => {
       const data = parseFormData(store);
       const errors = validateRecordForm(data);
       if (errors.length) {
@@ -886,10 +945,11 @@ function render() {
       }
       data.id = generateId();
       data.status = "current";
-      activeEmployees.push(data);
-      syncToStorage();
 
-      showNotification("Employee registered in demo database.");
+      await IDB.put(CONFIG.STORE_ACTIVE, data);
+      activeEmployees.push(data);
+
+      showNotification("Employee registered successfully.");
       currentScreen = "current";
       render();
     };
@@ -913,7 +973,7 @@ function render() {
     document.getElementById("nav-dash").onclick = () => { currentScreen = "dashboard"; render(); };
     const search = document.getElementById("search-input");
 
-    search.addEventListener("input", e => {
+    search.addEventListener("input", (e) => {
       if (isCurrent) filterCurrentQuery = e.target.value;
       else filterArchiveQuery = e.target.value;
 
@@ -929,9 +989,10 @@ function render() {
 }
 
 function wireCards(source) {
-  document.querySelectorAll(".employee-card").forEach(card => {
+  document.querySelectorAll(".employee-card").forEach((card) => {
     card.onclick = () => displayDetailModal(card.getAttribute("data-id"), source);
   });
 }
 
+// Initial Boot
 render();
